@@ -1,174 +1,130 @@
-use std::error::Error;
-use async_openai::{types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role}, Client};
+use async_openai::{types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role}, Client, config::OpenAIConfig};
 use colored::Colorize;
-use async_openai::config::OpenAIConfig;
+use std::error::Error;
 
 struct BusinessInfo {
-    name: String,
+    business_name: String,
     description: String,
-    contact_info: ContactInfo,
+    industry: String,
+    // Additional fields can be added as we identify more relevant information to gather
 }
 
-struct ContactInfo {
-    email: String,
-    phone: Option<String>,
-    address: Option<String>,
-}
+impl BusinessInfo {
+    fn collect() -> Self {
+        println!("Please provide the brand name of your business:");
+        let mut business_name = String::new();
+        std::io::stdin().read_line(&mut business_name).expect("Failed to read line");
 
-fn collect_business_info() -> BusinessInfo {
-    BusinessInfo {
-        name: get_input("Enter the business name: "),
-        description: get_input("What is your business? Please inform me in as detailed as possible so I can understand!"),
-        contact_info: collect_contact_info(),
+        println!("What industry is your business in? (e.g. \"Personal Care Services\", \"Retail Trade\", \"Construction\"):");
+        let mut industry = String::new();
+        std::io::stdin().read_line(&mut industry).expect("Failed to read line");
+
+
+        println!("Please provide a detailed description of your business:");
+        let mut description = String::new();
+        std::io::stdin().read_line(&mut description).expect("Failed to read line");
+        
+        BusinessInfo {
+            business_name: business_name.trim().to_string(),
+            description: description.trim().to_string(),
+            industry: industry.trim().to_string(),
+        }
     }
 }
 
-fn collect_contact_info() -> ContactInfo {
-    ContactInfo {
-        email: get_input("Enter the business contact email: "),
-        phone: Some(get_input("Enter the business contact phone (leave blank if none): ")),
-        address: Some(get_input("Enter the business address (leave blank if none): ")),
+struct OpenAIHelper {
+    client: Client<OpenAIConfig>,
+}
+
+impl OpenAIHelper {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        dotenv::dotenv().unwrap();
+        let client = Client::new();
+        Ok(OpenAIHelper {
+            client,
+        })
     }
+        async fn generate_questions(&self, business: &BusinessInfo) -> Result<Vec<String>, Box<dyn Error>> {
+            let initial_prompt = format!(
+                "You are a customer helper AI, designed to assist with customer service related to a business named {}, in the industry {}. Your job is to learn and understand as much information about this business as possible so that you may help out as well as possible. Big parts of this are learning about what services the business provides, how a booking system (if any) works for the business, how long services take, how much money they cost, etc., it is your job to figure these out for the business. The business has provided you with this summary of their business: '{}'. Based on this provided brief description of the business, what specific do you wish to ask the business to better understand it so that you may help out customers at a better level. IN YOUR ANSWER, please provide the questions in order, do not use numerical order (\"1.\", \"2.\", etc.), simply just provide the question like so: \"- Question?\". Please for now ensure a maximum of 15 questions, try to cover essiental information that may not have been specified before getting into other questions.",
+                business.business_name, business.industry, business.description
+            );
+            
+            let request = CreateChatCompletionRequestArgs::default()
+                .max_tokens(512u16)
+                .model("gpt-3.5-turbo")
+                .messages(vec![
+                    ChatCompletionRequestMessageArgs::default()
+                        .role(Role::System)
+                        .content(&initial_prompt)
+                        .build()?
+                ])
+                .build()?;
+            
+            let response = self.client.chat().create(request).await?;
+            let ai_response = response.choices[0].message.content.clone().unwrap_or_else(String::new);
+                    
+            Ok(ai_response
+                .lines()
+                .map(|line| line.trim_start_matches('-').trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect())                     
+        }
+        
+        async fn gather_answers(&self, questions: &[String]) -> Vec<(String, String)> {
+            let mut answers_vec = Vec::new();
+        
+            for (index, question) in questions.iter().enumerate() {
+                println!("AI Question ({} of {}): {}", index + 1, questions.len() - 1, question);
+                println!("Provide an answer or type 'NA' if the question is not relevant:");
+            
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input).expect("Failed to read line");
+                let answer = input.trim().to_string();
+            
+                if answer.to_uppercase() != "NA" {
+                    answers_vec.push((question.clone(), answer));
+                }
+            }
+        
+            answers_vec
+        }
+        
 }
 
-fn get_input(prompt: &str) -> String {
-    println!("{}", prompt);
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input).expect("Failed to read line");
-    input.trim().to_string()
-}
+fn generate_prompt(business: &BusinessInfo, answered_questions: &[(String, String)]) -> String {
+    let formatted_answers = answered_questions
+        .iter()
+        .map(|(q, a)| format!("Q: {} A: {}", q, a))
+        .collect::<Vec<String>>()
+        .join("\n");
 
-async fn generate_ai_questions(client: &Client<OpenAIConfig>, business: &BusinessInfo) -> Result<Vec<String>, Box<dyn Error>> {
-    let initial_prompt = format!(
-        "Based on the provided description of '{}', what questions should we ask to better understand the business and its operations?",
-        business.description
-    );
-
-    let request = CreateChatCompletionRequestArgs::default()
-        .max_tokens(512u16)
-        .model("gpt-3.5-turbo")
-        .messages(vec![
-            ChatCompletionRequestMessageArgs::default()
-                .role(Role::System)
-                .content(&initial_prompt)
-                .build()?
-        ])
-        .build()?;
-
-    let response = client.chat().create(request).await?;
-    let ai_response = response.choices[0].message.content.clone().unwrap_or_else(String::new);
-
-    // Splitting the AI response into individual questions
-    Ok(ai_response.split('.').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect())
-}
-
-async fn collect_ai_answers(client: &Client<OpenAIConfig>, questions: &[String]) -> Result<Vec<String>, Box<dyn Error>> {
-    let mut answers = Vec::new();
-    for question in questions {
-        let mut conversation = vec![
-            ChatCompletionRequestMessageArgs::default()
-                .role(Role::System)
-                .content(question)
-                .build()?
-        ];
-
-        println!("{}> {}", "Assistant".green().bold(), question.cyan());
-
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).expect("Failed to read line");
-        println!("{}> {}", "User".blue().bold(), input.white());
-
-        answers.push(input.trim().to_string());
-    }
-
-    Ok(answers)
-}
-
-fn refine_description(business: &BusinessInfo, questions: &[String], answers: &[String]) -> String {
     format!(
-        "{}\n\nAdditional Information:\n{}",
-        business.description,
-        questions.iter().zip(answers.iter()).map(|(q, a)| format!("{}: {}", q, a)).collect::<Vec<_>>().join("\n")
-    )
+        "You are a customer helper AI, designed to assist with customer service related to a business named {}, working in the industry {}. The description given for this business is \"{}\" by your manager. Your role is to ensure that customer queries are answered correctly, including questions about pricing, services/products offered, appointment bookings and queries regarding appointments as well as any general questions about the nature of the business. Here is a list of more exhaustive information about the business to ensure you are clearly knowledgable about it: {}. Other directives for you are as follows: **Professionalism**: Always maintain a courteous and professional demeanor. Your responses should reflect the business's values and standards. **Transparency**: If a customer inquires about your nature, be honest. Inform them that you are an AI designed to assist and make their experience smoother. However, try to act as normal and human as possible, do not mention that you are an AI in any way whatsoever asides from if directly asked by the customer. Your ultimate goal is to ensure customer satisfaction by providing them with accurate, timely, and helpful responses. Every interaction should instill confidence in the customer about the business's capability and professionalism. Act accordingly. Respond to this prompt with nothing and await for new questions - which will be from customers.",
+        business.business_name, business.industry, business.description, formatted_answers
+        )
 }
-
-fn generate_prompt(business: &BusinessInfo, ai_questions: &[String]) -> String {
-    let mut prompt = format!(
-        "Hello! You're now assisting with matters related to {}. {}. \
-        As a personal assistant for the business, you have two primary responsibilities: \
-        1. **Appointment Bookings**: You can handle appointment bookings for clients. When a client requests an appointment, \
-        acknowledge their request, provide them with a confirmation (even if it's a simulated one for now), and ensure they have all the necessary details for their appointment. \
-        2. **Answering Questions**: You're equipped with information about the business and its services. Answer any questions clients might have, \
-        whether it's about services, pricing, hours of operation, or any other business-related topic. \
-        Always be courteous, professional, and helpful. Your goal is to provide clients with a seamless and pleasant experience, \
-        making them feel as if they're interacting with a well-informed human assistant. \
-        If a client ever asks about your nature, be honest and let them know you're an AI designed to assist them. \
-        However, always prioritize their needs and questions. Let's ensure every client interaction is positive and productive!\n\n",
-        business.name, business.description
-    );
-
-    prompt += "AI Generated Questions:\n";
-    for question in ai_questions {
-        prompt += &format!("- {}\n", question);
-    }
-
-    prompt += "\nContact Information:\n";
-    prompt += &format!("- Email: {}\n", business.contact_info.email);
-    if let Some(phone) = &business.contact_info.phone {
-        prompt += &format!("- Phone: {}\n", phone);
-    }
-    if let Some(address) = &business.contact_info.address {
-        prompt += &format!("- Address: {}\n", address);
-    }
-
-    prompt += "\nFeel free to proceed while adhering to these guidelines.\n";
-
-    println!("{}", prompt.bold().green());
-    
-    prompt
-}
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    dotenv::dotenv().unwrap();
-    let client: Client<OpenAIConfig> = Client::new();    
+    let business_info = BusinessInfo::collect();
 
-    let business_info = collect_business_info();
+    let openai_helper: OpenAIHelper = OpenAIHelper::new()?;
 
-    // Generate AI questions based on the business description
-    let questions = generate_ai_questions(&client, &business_info).await?;
+    let ai_questions = openai_helper.generate_questions(&business_info).await?;
 
-    let mut answers: Vec<String> = Vec::new();
-
-    // Ask the AI generated questions to the user and collect the answers
-    for (index, question) in questions.iter().enumerate() {
-        // Remove any leading digits and periods from the question
-        let cleaned_question = question.trim_start_matches(|c: char| c.is_numeric() || c == '.').trim();
-        
-        // If the cleaned question is empty, skip to the next question
-        if cleaned_question.is_empty() {
-            continue;
-        }
-        
-        println!("AI> {}. {}", index + 1, cleaned_question);
-        let answer = get_input("Your answer: ");
-        answers.push(answer);
-    }
+    let answered_questions_vec = openai_helper.gather_answers(&ai_questions).await;
     
-    let extended_description = format!("{}\n{}", business_info.description, answers.join("\n"));
+    print!("{esc}[2J{esc}[1;1H", esc = 27 as char);
 
-    let updated_business_info = BusinessInfo {
-        description: extended_description,
-        ..business_info
-    };
+    let generated_prompt = generate_prompt(&business_info, &answered_questions_vec);
+    println!("\n\nGenerated Prompt: {}", generated_prompt);
 
-    let prompt = generate_prompt(&updated_business_info, &questions);
 
     let mut conversation = vec![
         ChatCompletionRequestMessageArgs::default()
             .role(Role::System)
-            .content(&prompt)
+            .content(&generated_prompt)
             .build()?
     ];
 
@@ -188,7 +144,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .messages(conversation.clone())
             .build()?;
 
-        let response = client.chat().create(request).await?;
+        let response = openai_helper.client.chat().create(request).await?;
 
         for choice in &response.choices {
             if let Some(content) = &choice.message.content {
@@ -206,4 +162,3 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
-
