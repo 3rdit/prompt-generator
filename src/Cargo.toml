@@ -1,0 +1,13 @@
+[package]
+name = "gpt_testing"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-openai = "0.14.3"
+colored = "2.0.4"
+dotenv = "0.15.0"
+tokio = { version = "1.25.0", features = ["full"] }
+reqwest = "0.11.22"
