@@ -1,10 +1,59 @@
 use async_openai::{types::{ChatCompletionRequestMessageArgs, CreateChatCompletionRequestArgs, Role}, Client, config::OpenAIConfig};
 use colored::Colorize;
 use std::error::Error;
-extern crate chrono;
 use chrono::{Local, DateTime};
+use reqwest::{self};
+use serde_derive::{Serialize, Deserialize};
+use dotenv;
 
 const GPT_VERSION: &str = "gpt-3.5-turbo";
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SentimentPredictorResponse {
+    prediction: String,
+}
+
+pub struct SentimentPredictor {
+    base_url: String,
+    http_client: reqwest::Client,
+    trained: std::sync::atomic::AtomicBool,
+}
+
+impl SentimentPredictor {
+    pub fn new(base_url: &str) -> Self {
+        let http_client = reqwest::Client::new();
+        
+        SentimentPredictor {
+            base_url: base_url.to_string(),
+            http_client,
+            trained: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub async fn train(&self) -> Result<(), Box<dyn Error>> {
+        if self.trained.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(Box::new(std::io::Error::new(std::io::ErrorKind::Other, "Already trained.")));
+        }
+
+        let url = format!("{}/train", self.base_url);
+        self.http_client.post(&url).send().await?;
+
+        self.trained.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    pub async fn analyse_sentiment(&self, text: &str) -> Result<String, Box<dyn Error>> {
+        let url = format!("{}/predict", self.base_url);
+
+        let response = self.http_client.post(&url)
+            .json(&serde_json::json!({"text": text}))
+            .send()
+            .await?;
+
+        let content: SentimentPredictorResponse = response.json().await?;
+        Ok(content.prediction)
+    }
+}
 
 struct BusinessInfo {
     business_name: String,
@@ -223,6 +272,16 @@ fn update_prompt(current_prompt: String, user_prompt: String, new_reply: String)
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let predictor = SentimentPredictor::new("http://localhost:8000");
+
+    println!("Training sentiment predictor...");
+
+    //TODO: make it so we dont have to train everytime (/is-trained maybe?)
+    match predictor.train().await {
+        Ok(_) => println!("Training completed successfully."),
+        Err(e) => eprintln!("Training error: {}", e), // If it's already trained, it will print this error.
+    }
+
     let openai_helper: OpenAIHelper = OpenAIHelper::new()?;
 
     let business_info = BusinessInfo::collect();
@@ -307,13 +366,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             input.clear();
             continue;
         }
-    
-        println!("{}> {}", "User".blue().bold(), input_trim.white());
+
+        let sentiment_prediction = match predictor.analyse_sentiment(input_trim).await {
+            Ok(prediction) => prediction,
+            Err(e) => {
+                eprintln!("Prediction error: {}", e);
+                "unknown".to_string()
+            }
+        };
+        
+        println!("> {} {}", sentiment_prediction, "User".blue().bold());
+
         conversation.push(ChatCompletionRequestMessageArgs::default()
             .role(Role::User)
             .content(input_trim)
             .build()?
         );
+        
     
         let request = CreateChatCompletionRequestArgs::default()
             .max_tokens(512u16)
