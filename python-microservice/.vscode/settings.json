@@ -1,0 +1,6 @@
+{
+    "python.analysis.extraPaths": [
+        "./sentimental_analysis",
+        "./gmail_automator"
+    ]
+}

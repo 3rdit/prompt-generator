@@ -282,6 +282,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Err(e) => eprintln!("Training error: {}", e), // If it's already trained, it will print this error.
     }
 
+    println!("{}", predictor.analyse_sentiment("I love this work!").await?);
+    println!("{}", predictor.analyse_sentiment("I hate this").await?);
+
     let openai_helper: OpenAIHelper = OpenAIHelper::new()?;
 
     let business_info = BusinessInfo::collect();
